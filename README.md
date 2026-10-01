@@ -196,6 +196,16 @@ function getUserStoreId(userId, userSockets) {
 | `testCycleDeleted` | TestCycle delete | `TestCyclesActions.deleteTestCycle(id)` |
 | `settingsAdded` | StoreSettings insert | `StoreSettingsActions.setStoreSettings({ settings })` |
 | `settingsUpdated` | StoreSettings update | `StoreSettingsActions.editStoreSettings({ id, changes })` |
+| `tuitionChanged` | *(2026-09-23, NOT a change stream)* emitted by the tuition **write controllers** (plans, installments, payments, τμήμα pricing, private lessons) via `helpers/emitTuitionChanged` → the store's store-users | not NgRx: `WebSocketService.tuitionChanged$` (`{kind, student_id, by, at}`); the finance views refetch — see tuition brain repo §6c |
+| `parentMeetingAdded` / `…Updated` / `…Deleted` | *(2026-09-24)* ParentMeeting insert / update / delete → `getStoreUsersToNotify(store_id)` | **signal only** `{ id, at }` — no NgRx slice exists; the page refetches. Soft delete (update with `isDeleted`) is emitted as `…Deleted` |
+| `prospectChanged` | *(2026-09-24)* Prospect insert/update/delete → `getSuperadminsToNotify()` — prospects have **no `store_id`**, they are global | signal `{ id, op, at }`, `op` ∈ insert/update/delete; the page refetches |
+| `prospectAppointmentChanged` | *(2026-09-24)* ProspectAppointment insert/update/delete → superadmins | signal `{ id, prospect_id, op, at }` |
+| `gradeApprovalsChanged` | *(2026-09-24)* StudentCourseGrade **or** TestCourseGrade change that moves the *pending* count → `getStoreUsersToNotify(store_id)` | signal `{ kind: 'course'\|'test', at }`; the home badge refetches its count |
+
+> **Controller-emitted events** (like `tuitionChanged`) use `req.app.get("io")` /
+> `get("userSockets")` (set in `index.js`). This works only because the API runs as a
+> **single pm2 fork process**; under a cluster, move them to a change stream or add a
+> Redis adapter.
 
 ---
 
@@ -318,6 +328,69 @@ Shows a full-screen semi-transparent overlay with the animation when not connect
 ---
 
 ## Known Gaps & Limitations
+
+**2026-09-24 — five watchers added (UNCOMMITTED), 15 → 20 change streams.**
+`watchParentMeetings` (handlers/parent-meetings.js), `watchProspects`
+(handlers/prospect.js), `watchProspectAppointments`
+(handlers/prospectAppointment.js) and `watchCourseGradeApprovals` +
+`watchTestGradeApprovals` (**new** handlers/grade-approvals.js), all registered
+in the `index.js` `startWatcher` list. Notes:
+
+- All four target features **self-fetch** (no NgRx slice), so these emit a
+  **light signal** and the client re-reads through the normal endpoint. Nothing
+  about the document crosses the socket, so the read layer's store scoping still
+  holds.
+- `grade-approvals.js` deliberately uses **two watchers, not one function
+  opening two streams**: `guardChangeStream` restarts whatever function it is
+  given, so one function owning both streams would re-open BOTH when only one
+  errored and leak the healthy one. Anyone adding a multi-collection watcher
+  must do the same.
+- The badge watcher emits **only when the pending count can move** (`status`
+  written, or `isDeleted` written on a pending row, or an insert/hard-delete of
+  a pending row). Editing an already-approved grade — the common case — stays
+  quiet. `storeToNotifyFor` is exported as `_internals` and covered by 15 cases.
+- Hard deletes need `fullDocumentBeforeChange` (pre-images). It is requested
+  `whenAvailable`, so if pre-images are off on the collection the watcher stays
+  **quiet** rather than broadcasting to the wrong audience.
+- **Frontend wiring (2026-09-24):** `gradeApprovalsChanged` is consumed —
+  `WebSocketService.gradeApprovalsChanged$`, then **debounced 800 ms** by each
+  consumer so a bulk approval costs one refetch, not one per grade (same
+  pattern as `tuitionChanged$` in the finance views). The **home badge**
+  refetches both counts (two cheap count queries, so `kind` is ignored there)
+  and no longer zeroes them first — that would blink the badge to 0 mid-refresh
+  and leave it wrong if the request failed. The **/grade-approvals list** uses
+  `kind` to refresh only the affected list, silently (no spinner), and skips
+  while an approve/reject is in flight. Both were wired together on purpose: a
+  live badge over a stale list would contradict itself on screen.
+- `parentMeeting*` / `prospectChanged` / `prospectAppointmentChanged` are
+  consumed too (2026-09-24): `parentMeetingsChanged$` (the three server events
+  collapse into one stream — the consumers refetch, so *which* name carried the
+  news doesn't matter), `prospectsChanged$`, `prospectAppointmentsChanged$`.
+  Wired on the **parent-meetings list**, the **prospects list** (both streams
+  merged — an appointment can advance a lead's status, which the list groups on)
+  and **prospect details** (filtered to `e.id === id` / `e.prospect_id === id`).
+- **The parent-meeting EDITOR is deliberately NOT wired.** It edits the meeting
+  in place and has **no dirty tracking**, so a silent refetch would discard the
+  admin's unsaved zones without a word. It needs a `remoteChanged` banner like
+  `student-tuition` has — refresh on the user's command, never behind their back.
+  The prospect detail page *is* wired because its status form lives in separate
+  fields (`newStatus`/`statusNote`/`statusDate`), so a refetch replaces only the
+  displayed record and a half-written note survives.
+
+**`calendarEvent*` — consumed since 2026-09-24 (uncommitted).** It had been
+emitted into the void since 2026-07-16. `WebSocketService` now republishes the
+three events as one `calendarChanged$` stream (`{op:'upsert'|'delete'}`) and
+`CalendarComponent` patches its own `events[]` instead of refetching — the push
+carries the full document. The client re-derives `day` with **UTC**
+(`toISOString().slice(0,10)`), exactly like the server, which is only safe
+because events are pinned to UTC midnight; a local-date derivation would drift a
+day east of UTC. Details in the calendar brain repo §9.
+
+Two gaps remain: **derived feed entries never push** (tests, announcements,
+parent meetings, lessons are recomputed per request), and **losing access is
+silent** — dropping someone from a shared event's audience emits to
+`viewerIdsOf(NEW doc)`, which no longer includes them, so it lingers on their
+calendar until a refetch.
 
 - `userSockets` is **in-memory** — a server restart clears all registrations; clients must reconnect and re-register
 - On reconnect, the frontend re-emits `register` but only passes `userId` (not the full `{ userId, role, storeId }` object) — this could result in incomplete `userSockets` entry after reconnect
