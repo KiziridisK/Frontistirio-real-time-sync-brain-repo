@@ -1,5 +1,12 @@
 # Frontistirio — Real-Time Sync Brain
 
+> **Κατάσταση τεκμηρίωσης** (σφραγίδα 2026-10-24) · τελευταία γραφή **2026-10-01**.
+> **Δεν φέρει επαλήθευση έναντι κώδικα** — κανόνας #4 του ευρετηρίου. Από εκείνη την ημερομηνία ο κώδικας
+> έχει προχωρήσει **83 commits** στο frontend και **16** στο API (όλο το repo, όχι μόνο αυτό το feature).
+> Σημερινά HEAD: frontend `0f466e0` / API `cabaa2c`.
+> Το σώμα καλύπτει μέχρι **2026-09-24**· η γραφή της 10-01 ήταν το commit της.
+> Τι είναι **γνωστό** ότι λείπει: §5 και §5.1 του ευρετηρίου (`Frontistirio-brain-repos-index`).
+
 > **Full-stack reference** for the entire real-time pipeline: MongoDB Change Streams → backend watcher functions → Socket.IO → Angular NgRx store. Covers every event, the exact watcher logic, reconnection strategy, and the connection-lost UI.
 
 ---
